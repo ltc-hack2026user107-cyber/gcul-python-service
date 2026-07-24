@@ -1,0 +1,170 @@
+# Lloyds LTC Reboot 2026
+
+## Disclaimer
+This repository and all included code is strictly limited to non-production demo and example purposes.
+
+## Access Notice
+Access is temporary (30 days). Ensure you have cloned the content before 2026-08-19.
+
+A Python project integrating with the [Google Cloud Universal Ledger (GCUL) API](https://github.com/googleapis/googleapis/tree/master/google/cloud/universalledger/v1).
+
+## Project Structure
+
+| Path | Description |
+| :--- | :--- |
+| [`01-create-account.py`](./01-create-account.py) | Script to generate a local EC keypair and create a new user account on the Universal Ledger via Account Manager. |
+| [`02-fund-account.py`](./02-fund-account.py) | Script to fund a user account (`Mint`) using Token Manager and Cloud KMS signing. |
+| [`03-transfer.py`](./03-transfer.py) | Script to transfer currency units between user accounts with local ECDSA P-256 signing. |
+| [`04a-grant-contract-roles.py`](./04a-grant-contract-roles.py) | Script to grant smart contract creator and participant roles to a user account via Account Manager. |
+| [`04b-deploy-smart-contract.py`](./04b-deploy-smart-contract.py) | Script to deploy a compiled smart contract (`.bin`) to the Universal Ledger. |
+| [`04c-invoke-and-query-contract.py`](./04c-invoke-and-query-contract.py) | Script to invoke a method on a deployed contract and query its state (`contract_fields`). |
+| [`protos/google/cloud/universalledger`](./protos/google/cloud/universalledger) | Raw Protocol Buffer (`.proto`) definitions for the Google Cloud Universal Ledger (v1) API. |
+| [`src/google/cloud/universalledger/v1`](./src/google/cloud/universalledger/v1) | Compiled Python Protobuf message classes (`*_pb2.py`) and gRPC client/server stubs (`*_pb2_grpc.py`). |
+| [`src/lloyds_ltc_reboot_2026`](./src/lloyds_ltc_reboot_2026) | Shared helper module (`helpers.py`) used by the scripts for ledger connections and transaction signing. |
+| [`LICENSE`](./LICENSE) | Full text of the Apache License 2.0 under which this repository is distributed. |
+
+## Protocol Buffers & gRPC Bindings
+
+To avoid downloading the entire `googleapis/googleapis` repository, the Google Cloud Universal Ledger (`universalledger/v1`) protobuf definitions were introduced using `git clone --filter=blob:none --sparse` / `git sparse-checkout` and placed cleanly into [`protos/google/cloud/universalledger/v1`](./protos/google/cloud/universalledger/v1).
+
+The corresponding Python gRPC stubs and message bindings (`_pb2.py` and `_pb2_grpc.py`) have been compiled into [`src/google/cloud/universalledger/v1`](./src/google/cloud/universalledger/v1), allowing immediate import across the project:
+
+```python
+from google.cloud.universalledger.v1 import universalledger_pb2, universalledger_pb2_grpc, types_pb2
+```
+
+## Dependencies
+
+The project relies on the following runtime packages defined in [`pyproject.toml`](./pyproject.toml#L23-L28):
+
+| Package | Version Constraint | Purpose |
+| :--- | :--- | :--- |
+| `protobuf` | `>=4.21.0` | Core Protocol Buffers library for serializing/deserializing messages and supporting the compiled `*_pb2.py` classes (e.g., `ClientTransaction`, `SignedTransaction`). |
+| `grpcio` | `>=1.50.0` | Python gRPC runtime required by `*_pb2_grpc.py` client stubs (`UniversalLedgerStub`) to communicate over RPC with remote Universal Ledger endpoints. |
+| `googleapis-common-protos` | `>=1.56.0` | Provides standard Google API primitive types (`google/api/annotations.proto`, `google/api/field_behavior.proto`, etc.) and Python stubs imported by the compiled Universal Ledger bindings at runtime. |
+| `google-cloud-kms` | `>=3.0.0` | Google Cloud Key Management Service client library (`kms.KeyManagementServiceClient`) used to perform asymmetric signing (`asymmetric_sign`) of transaction SHA-256 digests before submission to the ledger. |
+
+## Prerequisites
+
+Before setting up or running the project, ensure your environment meets the following requirements:
+
+1. **Application Default Credentials (ADC)**: Configured (`gcloud auth application-default login`) with sufficient IAM roles to interact with target Google Cloud resources.
+2. **Cloud KMS Keys**: Access to two asymmetric signing keys in Google Cloud Key Management Service (KMS):
+   - **Account Manager Key**: For signing account lifecycle and management transactions.
+   - **Token Manager Key**: For signing token lifecycle transactions (minting, transfers, burning).
+3. **Universal Ledger Python Compiler (`gculpyc`)**: Access to the containerized `gculpyc` compiler tool via Docker to compile contracts (such as [`gculpy/counter.py`](./gculpy/counter.py)) into bytecode:
+
+```bash
+docker pull us-docker.pkg.dev/gcul-artifacts/images/client/gculpyc:preview
+alias gculpyc="docker run --rm -i --user $(id -u):$(id -g) \
+    --volume .:/workspace --workdir /workspace \
+    us-docker.pkg.dev/gcul-artifacts/images/client/gculpyc:preview"
+gculpyc --help
+
+# Compile a smart contract source file to bytecode (.bin)
+gculpyc --source_file gculpy/counter.py --output_file gculpy/counter.bin
+```
+
+## Setup & Installation
+
+We recommend using a virtual environment (`venv`):
+
+```bash
+# Create and activate a virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install the package in editable mode along with its protobuf & gRPC dependencies
+pip install -e .
+```
+
+## Scripts & Usage
+
+The repository provides six end-to-end scripts for interacting with the Universal Ledger alongside a shared helper module ([`src/lloyds_ltc_reboot_2026/helpers.py`](./src/lloyds_ltc_reboot_2026/helpers.py)):
+
+| Script | Description |
+| :--- | :--- |
+| [`01-create-account.py`](./01-create-account.py) | Generates a local P-256 EC keypair, saves it to `keys/user_{N:03d}.pem`, and creates a new user account (with `ROLE_PAYER` and `ROLE_RECEIVER`) using the Account Manager signed via Cloud KMS. |
+| [`02-fund-account.py`](./02-fund-account.py) | Uses the Token Manager and KMS signing to issue (`Mint`) 100 currency units to a user account (specified via required `--account-id`). |
+| [`03-transfer.py`](./03-transfer.py) | Uses sender and receiver Account IDs (specified via required `--from-account-id` and `--to-account-id`). Signs the `Transfer` transaction locally with the sender's EC P-256 private key (`keys/user_*.pem`) using DER formatting. |
+| [`04a-grant-contract-roles.py`](./04a-grant-contract-roles.py) | Uses the Account Manager via KMS to grant `ROLE_CONTRACT_CREATOR` and `ROLE_CONTRACT_PARTICIPANT` to an existing user account (`--account-id`). |
+| [`04b-deploy-smart-contract.py`](./04b-deploy-smart-contract.py) | Deploys a compiled smart contract (`gculpy/counter.bin` by default) via `CreateContract` signed locally by `--creator-account-id`. Prints the created Contract ID. |
+| [`04c-invoke-and-query-contract.py`](./04c-invoke-and-query-contract.py) | Invokes a method (`increment` by default) on a deployed contract (`--contract-id`) via `InvokeContractMethod` signed locally by `--participant-account-id`. Then queries and prints contract state and `contract_fields`. |
+
+### Copy-and-Pasteable Invocations
+
+You can run all three scripts end-to-end passing the Account Manager and Token Manager parameters directly via command-line flags alongside your generated local keys:
+
+```bash
+# ==============================================================================
+# 1. Create User Account #001 & #002 (via Account Manager + KMS)
+# ==============================================================================
+# Each run automatically generates a P-256 EC keypair, creates the account on 
+# the ledger using the provided Account Manager credentials, and stores metadata in keys/
+python3 01-create-account.py \
+    --account-manager-id "1:ACT:DEM:012y6YGTpPyNaixAzto6Mxc8ykFM1QRyn9EyVDtdFcM4c" \
+    --account-manager-kms-key "projects/moritzp-gcul-testing/locations/de/keyRings/gcul/cryptoKeys/dem-currency-operator-pilot-testing/cryptoKeyVersions/1"
+
+python3 01-create-account.py \
+    --account-manager-id "1:ACT:DEM:012y6YGTpPyNaixAzto6Mxc8ykFM1QRyn9EyVDtdFcM4c" \
+    --account-manager-kms-key "projects/moritzp-gcul-testing/locations/de/keyRings/gcul/cryptoKeys/dem-currency-operator-pilot-testing/cryptoKeyVersions/1"
+
+
+# ==============================================================================
+# 2. Fund User Account #001 with 100 currency units (via Token Manager + KMS)
+# ==============================================================================
+python3 02-fund-account.py \
+    --token-manager-id "1:TKN:DEM:013gFy2oxRxWDnSYC2ZVMQV4JDwTRhndLCBG652zJpj29" \
+    --token-manager-kms-key "projects/moritzp-gcul-testing/locations/de/keyRings/gcul/cryptoKeys/dem-currency-operator-pilot-testing/cryptoKeyVersions/1" \
+    --account-id 1:USR:DEM:013vK2ey8CRk69H6neUApnaTF5LNP92EDYhMdQ6xKm917 \
+    --amount 100
+
+
+# ==============================================================================
+# 3. Transfer 100 currency units from Account #001 to #002 (Local ECDSA Signing)
+# ==============================================================================
+# Uses local private key matching sender Account ID to sign the Transfer transaction to
+# beneficiary 1:USR:DEM:015AYh8rNY6vPVJkpm3x91soahkB3YwRQbUWT2gX3gu4c:
+python3 03-transfer.py \
+    --from-account-id 1:USR:DEM:013vK2ey8CRk69H6neUApnaTF5LNP92EDYhMdQ6xKm917 \
+    --to-account-id 1:USR:DEM:015AYh8rNY6vPVJkpm3x91soahkB3YwRQbUWT2gX3gu4c \
+    --amount 100
+
+
+# ==============================================================================
+# 4. Compile Smart Contract (Prerequisite for 04b and 04c)
+# ==============================================================================
+# Pull and alias the containerized gculpyc compiler to compile counter.py:
+docker pull us-docker.pkg.dev/gcul-artifacts/images/client/gculpyc:preview
+alias gculpyc="docker run --rm -i --user $(id -u):$(id -g) \
+    --volume .:/workspace --workdir /workspace \
+    us-docker.pkg.dev/gcul-artifacts/images/client/gculpyc:preview"
+
+# Verify compiler flags and compile the contract source into bytecode:
+gculpyc --help
+gculpyc --source_file gculpy/counter.py --output_file gculpy/counter.bin
+
+
+# ==============================================================================
+# 5. Grant Contract Roles, Deploy, Invoke & Read Contract (04a, 04b, 04c)
+# ==============================================================================
+# 04a: Grant contract creator and participant roles to User Account #001:
+python3 04a-grant-contract-roles.py \
+    --account-manager-id "1:ACT:DEM:012y6YGTpPyNaixAzto6Mxc8ykFM1QRyn9EyVDtdFcM4c" \
+    --account-manager-kms-key "projects/moritzp-gcul-testing/locations/de/keyRings/gcul/cryptoKeys/dem-currency-operator-pilot-testing/cryptoKeyVersions/1" \
+    --account-id 1:USR:DEM:013vK2ey8CRk69H6neUApnaTF5LNP92EDYhMdQ6xKm917
+
+# 04b: Deploy gculpy/counter.bin to the ledger using Account #001:
+python3 04b-deploy-smart-contract.py \
+    --creator-account-id 1:USR:DEM:013vK2ey8CRk69H6neUApnaTF5LNP92EDYhMdQ6xKm917
+# -> Note the printed "Contract created: 1:CTR:..." output for the next step.
+
+# 04c: Invoke the 'increment' method and query the counter state on the contract:
+python3 04c-invoke-and-query-contract.py \
+    --participant-account-id 1:USR:DEM:013vK2ey8CRk69H6neUApnaTF5LNP92EDYhMdQ6xKm917 \
+    --contract-id 1:CTR:REPLACE_WITH_YOUR_DEPLOYED_CONTRACT_ID
+```
+
+## License
+
+This project is licensed under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0) - see the [`LICENSE`](./LICENSE) file for details.

@@ -1,0 +1,141 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# NOTE: This code is strictly limited to non-production demo and example purposes.
+# This repo does not contain code that is either (1) intended to be used in a
+# customer's production environment beyond just demo purposes, or (2) proprietary
+# or may be used to build a future Google product or solution, or (3) is subject
+# to a customer expectation of managed support or a warranty.
+
+"""04c-invoke-and-query-contract.py: Invokes a smart contract method and queries the contract state on the Universal Ledger."""
+
+import argparse
+import sys
+
+from google.cloud.universalledger.v1 import (
+    query_pb2,
+    transactions_pb2,
+    types_pb2,
+    universalledger_pb2,
+)
+from lloyds_ltc_reboot_2026 import helpers
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Invoke a smart contract method using a participant user account and read contract state via QueryAccount."
+    )
+    parser.add_argument(
+        "--participant-account-id",
+        type=str,
+        required=True,
+        help="Account ID of the user account holding ROLE_CONTRACT_PARTICIPANT.",
+    )
+    parser.add_argument(
+        "--contract-id",
+        type=str,
+        required=True,
+        help="Account ID of the deployed smart contract to invoke and query.",
+    )
+    parser.add_argument(
+        "--method-name",
+        type=str,
+        default="increment",
+        help="Name of the contract method to invoke (default: increment).",
+    )
+    args = parser.parse_args()
+
+    participant_id = args.participant_account_id
+    contract_id = args.contract_id
+
+    try:
+        _, participant_private_pem, _ = helpers.load_user_account_by_id(participant_id)
+        print(f"[*] Loaded Contract Participant Account ID: {participant_id}")
+    except FileNotFoundError as e:
+        print(f"[!] Error loading participant account key: {e}", file=sys.stderr)
+        print("[i] Hint: Ensure the account metadata and private key exist in the keys/ directory.", file=sys.stderr)
+        sys.exit(1)
+
+    print("[*] Connecting to Universal Ledger and selecting endpoint...")
+    stub, endpoint = helpers.get_stub_and_endpoint()
+    print(f"[*] Selected endpoint: {endpoint}")
+
+    print(f"[*] Fetching sequence number for Participant Account ({participant_id})...")
+    seq_num = helpers.get_sequence_number(stub, endpoint, participant_id)
+    print(f"[*] Participant Sequence Number: {seq_num}")
+
+    print(f"[*] Constructing InvokeContractMethod transaction for method '{args.method_name}' -> {contract_id}...")
+    invoke_method_tx = transactions_pb2.InvokeContractMethod(
+        contract_id=contract_id,
+        method_name=args.method_name,
+    )
+
+    client_tx = types_pb2.ClientTransaction(
+        sender_id=participant_id,
+        sequence_number=seq_num,
+        invoke_contract_method_transaction=invoke_method_tx,
+    )
+
+    print(f"[*] Signing InvokeContractMethod locally with {participant_id} private key and submitting...")
+    tx_digest, cert = helpers.sign_and_submit_with_local_key(
+        stub,
+        endpoint,
+        participant_id,
+        participant_private_pem,
+        client_tx,
+    )
+    print(f"[+] InvokeContractMethod finalized! Digest: {tx_digest}")
+    print(f"Contract method '{args.method_name}' invoked successfully on {contract_id}.")
+
+    # Read the contract state
+    print(f"\n[*] Submitting QueryAccount request to read contract state ({contract_id})...")
+    query_req = universalledger_pb2.QueryAccountRequest(endpoint=endpoint, account_id=contract_id)
+    query_resp = stub.QueryAccount(query_req)
+
+    print("\n" + "=" * 60)
+    print(f"Account: {contract_id}")
+    if query_resp.HasField("account") and query_resp.account.HasField("contract_details"):
+        cd = query_resp.account.contract_details
+        print("Contract account details:")
+        print(f"  Owner: {cd.owner_id}")
+        print("  Contract fields:")
+        if cd.HasField("contract_fields") and cd.contract_fields.fields:
+            for field_name, field_val in cd.contract_fields.fields.items():
+                if field_val.HasField("int64_value"):
+                    val_str = f"int64_value:{field_val.int64_value}"
+                elif field_val.HasField("string_value"):
+                    val_str = f"string_value:\"{field_val.string_value}\""
+                elif field_val.HasField("bool_value"):
+                    val_str = f"bool_value:{field_val.bool_value}"
+                elif field_val.HasField("bytes_value"):
+                    val_str = f"bytes_value:{field_val.bytes_value.hex()}"
+                else:
+                    val_str = str(field_val).strip().replace("\n", " ")
+                print(f"    {field_name}: {val_str}")
+        else:
+            print("    None")
+
+        print("\n  Balances:")
+        if cd.currency_balances:
+            for curr, bal in cd.currency_balances.items():
+                print(f"    {curr}: {bal.value}")
+        else:
+            print("    None")
+    else:
+        print("  (No contract_details returned in QueryAccount response)")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()

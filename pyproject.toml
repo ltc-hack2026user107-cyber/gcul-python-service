@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lloyds-ltc-reboot-2026"
+version = "0.1.0"
+description = "Lloyds LTC Reboot 2026 Samples"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [
+    { name = "Moritz Platt", email = "moritzp@google.com" }
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "protobuf>=4.21.0",
+    "grpcio>=1.50.0",
+    "googleapis-common-protos>=1.56.0",
+    "google-cloud-kms>=3.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
