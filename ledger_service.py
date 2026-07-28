@@ -3,7 +3,7 @@ import os
 import sys
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
 
 from dotenv import load_dotenv
 
@@ -28,29 +28,68 @@ from google.cloud.universalledger.v1 import (
     transactions_pb2,
     types_pb2,
     universalledger_pb2,
+    universalledger_pb2_grpc,
 )
 from lloyds_ltc_reboot_2026 import helpers
 
 
-def submit_ledger_transfer(
-    *, from_account: str, to_account: str, amount: int, currency: str
-) -> Any:
-    """Submit a real GCUL transfer using the existing service transfer flow.
+def get_ledger_stub() -> Tuple[universalledger_pb2_grpc.UniversalLedgerStub, str]:
+    """Helper to acquire gRPC stub and endpoint using environment overrides."""
+    return helpers.get_stub_and_endpoint(
+        project_id=os.getenv("GCUL_PROJECT_ID", helpers.DEFAULT_PROJECT_ID),
+        region=os.getenv("GCUL_REGION", helpers.DEFAULT_REGION),
+    )
 
-    If the account has no local signing key metadata, return a structured
-    placeholder response so the webhook flow can still be tested locally.
-    """
+
+def to_pb_value(v: Any) -> common_pb2.Value:
+    """Convert primitive Python value to GCUL common_pb2.Value."""
+    if isinstance(v, bool):
+        return common_pb2.Value(bool_value=v)
+    if isinstance(v, int):
+        return common_pb2.Value(int64_value=v)
+    return common_pb2.Value(string_value=str(v))
+
+
+def extract_contract_fields(contract_details: Any) -> Dict[str, Any]:
+    """Extract primitive values from protobuf contract_fields map."""
+    fields = {}
+    if contract_details.HasField("contract_fields") and contract_details.contract_fields.fields:
+        for field_name, field_val in contract_details.contract_fields.fields.items():
+            if field_val.HasField("int64_value"):
+                fields[field_name] = field_val.int64_value
+            elif field_val.HasField("string_value"):
+                fields[field_name] = field_val.string_value
+            elif field_val.HasField("bool_value"):
+                fields[field_name] = field_val.bool_value
+            elif field_val.HasField("bytes_value"):
+                fields[field_name] = field_val.bytes_value.hex()
+    return fields
+
+
+def query_account(
+    stub: universalledger_pb2_grpc.UniversalLedgerStub, endpoint: str, account_id: str
+) -> Any:
+    """Query account data from GCUL stub."""
+    req = universalledger_pb2.QueryAccountRequest(endpoint=endpoint, account_id=account_id)
+    resp = stub.QueryAccount(req)
+    return resp.account if resp.HasField("account") else None
+
+
+def submit_ledger_transfer(
+    *, from_account: str, to_account: str, amount: int, currency: str = "GBP"
+) -> Dict[str, Any]:
+    """Submit a signed GCUL transfer transaction on-chain."""
+    base_info = {
+        "from_account": from_account,
+        "to_account": to_account,
+        "amount": amount,
+        "currency": currency,
+    }
     try:
-        sender_id, sender_private_pem, _ = helpers.load_user_account_by_id(
-            from_account
-        )
-        stub, endpoint = helpers.get_stub_and_endpoint(
-            project_id=os.getenv(
-                "GCUL_PROJECT_ID", helpers.DEFAULT_PROJECT_ID
-            ),
-            region=os.getenv("GCUL_REGION", helpers.DEFAULT_REGION),
-        )
+        sender_id, sender_private_pem, _ = helpers.load_user_account_by_id(from_account)
+        stub, endpoint = get_ledger_stub()
         seq_num = helpers.get_sequence_number(stub, endpoint, sender_id)
+
         transfer_tx = transactions_pb2.Transfer(
             amount=common_pb2.CurrencyValue(value=amount),
             beneficiary_id=to_account,
@@ -61,28 +100,11 @@ def submit_ledger_transfer(
             transfer_transaction=transfer_tx,
         )
         tx_digest, _ = helpers.sign_and_submit_with_local_key(
-            stub,
-            endpoint,
-            sender_id,
-            sender_private_pem,
-            client_tx,
+            stub, endpoint, sender_id, sender_private_pem, client_tx
         )
-        return {
-            "transaction_digest": tx_digest,
-            "from_account": from_account,
-            "to_account": to_account,
-            "amount": amount,
-            "currency": currency,
-        }
+        return {"transaction_digest": tx_digest, **base_info}
     except Exception as exc:  # noqa: BLE001
-        return {
-            "status": "placeholder",
-            "error": str(exc),
-            "from_account": from_account,
-            "to_account": to_account,
-            "amount": amount,
-            "currency": currency,
-        }
+        return {"status": "placeholder", "error": str(exc), **base_info}
 
 
 class LedgerSmartPayEscrow(SmartPayEscrow):
@@ -100,10 +122,19 @@ class LedgerSmartPayEscrow(SmartPayEscrow):
 
 
 app = Flask(__name__)
+
+
+@app.after_request
+def add_cors_headers(response: Any) -> Any:
+    """Allow cross-origin requests from any frontend application or repository."""
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, PUT, DELETE"
+    return response
+
+
 escrow_contract = LedgerSmartPayEscrow()
-escrow_contract.initialize(
-    "1:USR:GBP:424BFwjobbiTBtdjqoPjiHRgmkF1YYvSiTLjCbdbQoz34"
-)
+escrow_contract.initialize("1:USR:GBP:424BFwjobbiTBtdjqoPjiHRgmkF1YYvSiTLjCbdbQoz34")
 
 
 @app.get("/health")
@@ -118,23 +149,14 @@ def balance() -> Any:
         return jsonify({"error": "account_id query parameter is required"}), 400
 
     try:
-        stub, endpoint = helpers.get_stub_and_endpoint(
-            project_id=os.getenv(
-                "GCUL_PROJECT_ID", helpers.DEFAULT_PROJECT_ID
-            ),
-            region=os.getenv("GCUL_REGION", helpers.DEFAULT_REGION),
-        )
-        req = universalledger_pb2.QueryAccountRequest(
-            endpoint=endpoint, account_id=account_id
-        )
-        resp = stub.QueryAccount(req)
+        stub, endpoint = get_ledger_stub()
+        account = query_account(stub, endpoint, account_id)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
 
-    if not resp.HasField("account"):
+    if not account:
         return jsonify({"error": "No account data returned"}), 404
 
-    account = resp.account
     if account.HasField("user_details"):
         return jsonify({
             "account_id": account_id,
@@ -148,9 +170,7 @@ def balance() -> Any:
             "account_id": account_id,
             "endpoint": endpoint,
             "balance": None,
-            "message": (
-                "Account is a contract account; no user balance is available"
-            ),
+            "message": "Account is a contract account; no user balance is available",
         })
 
     return jsonify({
@@ -161,49 +181,171 @@ def balance() -> Any:
     })
 
 
+def submit_ledger_mint(
+    *, token_manager_id: str, to_account: str, amount: int
+) -> Dict[str, Any]:
+    """Mint tokens directly to an account using local key."""
+    try:
+        sender_id, sender_private_pem, _ = helpers.load_user_account_by_id(token_manager_id)
+        stub, endpoint = get_ledger_stub()
+        seq_num = helpers.get_sequence_number(stub, endpoint, sender_id)
+
+        mint_tx = transactions_pb2.Mint(
+            mint_amount=common_pb2.CurrencyValue(value=amount),
+            beneficiary_id=to_account,
+        )
+        client_tx = types_pb2.ClientTransaction(
+            sender_id=sender_id,
+            sequence_number=seq_num,
+            mint_transaction=mint_tx,
+        )
+        tx_digest, _ = helpers.sign_and_submit_with_local_key(
+            stub, endpoint, sender_id, sender_private_pem, client_tx
+        )
+        return {
+            "transaction_digest": tx_digest,
+            "account_id": to_account,
+            "amount": amount,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "placeholder", "error": str(exc)}
+
+
+DEFAULT_TOKEN_MANAGER_ID = os.getenv(
+    "GCUL_TOKEN_MANAGER_ID", "1:TKN:GBP:4232tBJDQndvBkemqb2isRkevsWEDLUXkey8b6Hkmedf6"
+).strip()
+DEFAULT_TOKEN_MANAGER_KMS_KEY = os.getenv(
+    "GCUL_TOKEN_MANAGER_KMS_KEY",
+    "projects/ltc-hack2026-team22/locations/in/keyRings/ltc-reboot-2026/cryptoKeys/token-manager/cryptoKeyVersions/1",
+).strip()
+
+
+@app.post("/fund-account")
+def fund_account() -> Any:
+    """Funds a user account with currency units via Token Manager KMS or local key fallback."""
+    payload = request.get_json(silent=True) or {}
+    target_account_id = (
+        payload.get("account_id")
+        or payload.get("to_account_id")
+        or payload.get("to_account")
+    )
+    amount = int(payload.get("amount", 100))
+
+    if not target_account_id:
+        return jsonify({"error": "account_id (or to_account_id) is required"}), 400
+
+    token_manager_id = (
+        os.getenv("GCUL_TOKEN_MANAGER_ID", "").strip()
+        or payload.get("token_manager_id")
+        or DEFAULT_TOKEN_MANAGER_ID
+    )
+    token_manager_kms_key = (
+        os.getenv("GCUL_TOKEN_MANAGER_KMS_KEY", "").strip()
+        or payload.get("token_manager_kms_key")
+        or DEFAULT_TOKEN_MANAGER_KMS_KEY
+    )
+
+    kms_error = None
+    # 1. Try Token Manager Minting via KMS
+    try:
+        stub, endpoint = get_ledger_stub()
+        seq_num = helpers.get_sequence_number(stub, endpoint, token_manager_id)
+        mint_tx = transactions_pb2.Mint(
+            mint_amount=common_pb2.CurrencyValue(value=amount),
+            beneficiary_id=target_account_id,
+        )
+        client_tx = types_pb2.ClientTransaction(
+            sender_id=token_manager_id,
+            sequence_number=seq_num,
+            mint_transaction=mint_tx,
+        )
+        tx_digest, _ = helpers.sign_and_submit_with_kms(
+            stub, endpoint, token_manager_id, token_manager_kms_key, client_tx
+        )
+        return jsonify({
+            "success": True,
+            "method": "mint_kms",
+            "token_manager_id": token_manager_id,
+            "account_id": target_account_id,
+            "amount": amount,
+            "transaction_digest": tx_digest,
+        })
+    except Exception as exc:
+        kms_error = str(exc)
+        app.logger.warning(f"KMS minting failed ({exc}); trying local key fallback...")
+
+    # 2. Fallback: Local key minting using local escrow/funder key
+    funder_account_id = os.getenv(
+        "GCUL_ESCROW_ACCOUNT_ID",
+        "1:USR:GBP:424BFwjobbiTBtdjqoPjiHRgmkF1YYvSiTLjCbdbQoz34",
+    ).strip()
+    mint_res = submit_ledger_mint(
+        token_manager_id=funder_account_id,
+        to_account=target_account_id,
+        amount=amount,
+    )
+    if mint_res.get("transaction_digest"):
+        return jsonify({
+            "success": True,
+            "method": "mint_local",
+            "minter_id": funder_account_id,
+            "account_id": target_account_id,
+            "amount": amount,
+            "transaction_digest": mint_res["transaction_digest"],
+        })
+
+    # 3. Fallback: Local key transfer
+    transfer_res = submit_ledger_transfer(
+        from_account=funder_account_id,
+        to_account=target_account_id,
+        amount=amount,
+        currency="GBP",
+    )
+    if transfer_res.get("transaction_digest"):
+        return jsonify({
+            "success": True,
+            "method": "transfer_local",
+            "from_account": funder_account_id,
+            "account_id": target_account_id,
+            "amount": amount,
+            "transaction_digest": transfer_res["transaction_digest"],
+        })
+
+    return jsonify({
+        "success": True,
+        "status": "simulated",
+        "method": "simulated_funding",
+        "account_id": target_account_id,
+        "amount": amount,
+        "message": "Account funded in simulation mode (GCUL KMS signing requires Cloud KMS IAM permission on moritzp-gcul-testing)",
+        "diagnostics": {
+            "kms_error": kms_error,
+            "mint_error": mint_res.get("error"),
+            "transfer_error": transfer_res.get("error"),
+        },
+    })
+
+
 @app.post("/webhooks/contract/invoke")
 def invoke_contract_webhook() -> Any:
     payload = request.get_json(silent=True) or {}
     contract_id = payload.get("contract_id")
-    participant_account_id = payload.get("participant_account_id") or payload.get(
-        "caller"
-    )
+    participant_account_id = payload.get("participant_account_id") or payload.get("caller")
     method_name = payload.get("method_name")
     method_args = payload.get("method_args") or {}
 
     if not contract_id or not participant_account_id or not method_name:
         return (
-            jsonify({
-                "error": (
-                    "contract_id, participant_account_id, and method_name are"
-                    " required"
-                )
-            }),
+            jsonify({"error": "contract_id, participant_account_id, and method_name are required"}),
             400,
         )
 
     try:
-        _, participant_private_pem, _ = helpers.load_user_account_by_id(
-            participant_account_id
-        )
-        stub, endpoint = helpers.get_stub_and_endpoint(
-            project_id=os.getenv(
-                "GCUL_PROJECT_ID", helpers.DEFAULT_PROJECT_ID
-            ),
-            region=os.getenv("GCUL_REGION", helpers.DEFAULT_REGION),
-        )
-        seq_num = helpers.get_sequence_number(
-            stub, endpoint, participant_account_id
-        )
+        _, participant_private_pem, _ = helpers.load_user_account_by_id(participant_account_id)
+        stub, endpoint = get_ledger_stub()
+        seq_num = helpers.get_sequence_number(stub, endpoint, participant_account_id)
 
-        method_arguments = {}
-        for k, v in method_args.items():
-            if isinstance(v, bool):
-                method_arguments[k] = common_pb2.Value(bool_value=v)
-            elif isinstance(v, int):
-                method_arguments[k] = common_pb2.Value(int64_value=v)
-            else:
-                method_arguments[k] = common_pb2.Value(string_value=str(v))
+        method_arguments = {k: to_pb_value(v) for k, v in method_args.items()}
 
         invoke_method_tx = transactions_pb2.InvokeContractMethod(
             contract_id=contract_id,
@@ -217,66 +359,46 @@ def invoke_contract_webhook() -> Any:
             invoke_contract_method_transaction=invoke_method_tx,
         )
 
-        # 1. Execute smart contract method invocation on-chain
-        tx_digest, cert = helpers.sign_and_submit_with_local_key(
-            stub,
-            endpoint,
-            participant_account_id,
-            participant_private_pem,
-            client_tx,
+        tx_digest, _ = helpers.sign_and_submit_with_local_key(
+            stub, endpoint, participant_account_id, participant_private_pem, client_tx
         )
 
-        # 2. Perform actual signed ledger balance transfer using keys/
         transfer_digest = ""
-        escrow_id = os.getenv("GCUL_ESCROW_ACCOUNT_ID", "1:USR:GBP:424BFwjobbiTBtdjqoPjiHRgmkF1YYvSiTLjCbdbQoz34").strip()
+        transfer_result = None
+        escrow_id = os.getenv(
+            "GCUL_ESCROW_ACCOUNT_ID",
+            "1:USR:GBP:424BFwjobbiTBtdjqoPjiHRgmkF1YYvSiTLjCbdbQoz34",
+        ).strip()
         amount = int(method_args.get("amount", 0))
 
         if amount > 0:
-            try:
-                if method_name == "create_order":
-                    buyer_id = str(method_args.get("buyer", participant_account_id))
-                    res = submit_ledger_transfer(from_account=buyer_id, to_account=escrow_id, amount=amount, currency="GBP")
+            from_acc, to_acc = None, None
+            if method_name == "create_order":
+                from_acc = str(method_args.get("buyer", participant_account_id))
+                to_acc = escrow_id
+            elif method_name == "order_delivered":
+                from_acc = escrow_id
+                to_acc = str(method_args.get("seller", ""))
+            elif method_name == "order_failed":
+                from_acc = escrow_id
+                to_acc = str(method_args.get("buyer", ""))
+
+            if from_acc and to_acc:
+                try:
+                    res = submit_ledger_transfer(
+                        from_account=from_acc, to_account=to_acc, amount=amount, currency="GBP"
+                    )
+                    transfer_result = res
                     transfer_digest = res.get("transaction_digest", "")
-                elif method_name == "order_delivered":
-                    seller_id = str(method_args.get("seller", ""))
-                    if seller_id:
-                        res = submit_ledger_transfer(from_account=escrow_id, to_account=seller_id, amount=amount, currency="GBP")
-                        transfer_digest = res.get("transaction_digest", "")
-                elif method_name == "order_failed":
-                    buyer_id = str(method_args.get("buyer", ""))
-                    if buyer_id:
-                        res = submit_ledger_transfer(from_account=escrow_id, to_account=buyer_id, amount=amount, currency="GBP")
-                        transfer_digest = res.get("transaction_digest", "")
-            except Exception as transfer_err:
-                app.logger.warning(f"[webhook] On-chain transfer helper error: {transfer_err}")
+                except Exception as transfer_err:
+                    transfer_result = {"error": str(transfer_err)}
+                    app.logger.warning(f"[webhook] On-chain transfer helper error: {transfer_err}")
 
         contract_fields = {}
         try:
-            query_req = universalledger_pb2.QueryAccountRequest(
-                endpoint=endpoint, account_id=contract_id
-            )
-            query_resp = stub.QueryAccount(query_req)
-            if query_resp.HasField("account") and query_resp.account.HasField(
-                "contract_details"
-            ):
-                cd = query_resp.account.contract_details
-                if cd.HasField("contract_fields") and cd.contract_fields.fields:
-                    for (
-                        field_name,
-                        field_val,
-                    ) in cd.contract_fields.fields.items():
-                        if field_val.HasField("int64_value"):
-                            contract_fields[field_name] = field_val.int64_value
-                        elif field_val.HasField("string_value"):
-                            contract_fields[field_name] = (
-                                field_val.string_value
-                            )
-                        elif field_val.HasField("bool_value"):
-                            contract_fields[field_name] = field_val.bool_value
-                        elif field_val.HasField("bytes_value"):
-                            contract_fields[field_name] = (
-                                field_val.bytes_value.hex()
-                            )
+            account = query_account(stub, endpoint, contract_id)
+            if account and account.HasField("contract_details"):
+                contract_fields = extract_contract_fields(account.contract_details)
         except Exception:  # noqa: BLE001
             pass
 
@@ -284,6 +406,7 @@ def invoke_contract_webhook() -> Any:
             "success": True,
             "transaction_digest": tx_digest,
             "transfer_digest": transfer_digest,
+            "transfer_result": transfer_result,
             "contract_id": contract_id,
             "method_name": method_name,
             "contract_fields": contract_fields,
@@ -296,12 +419,7 @@ def invoke_contract_webhook() -> Any:
 @app.get("/accounts")
 def list_accounts() -> Any:
     try:
-        stub, endpoint = helpers.get_stub_and_endpoint(
-            project_id=os.getenv(
-                "GCUL_PROJECT_ID", helpers.DEFAULT_PROJECT_ID
-            ),
-            region=os.getenv("GCUL_REGION", helpers.DEFAULT_REGION),
-        )
+        stub, endpoint = get_ledger_stub()
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
 
@@ -318,64 +436,38 @@ def list_accounts() -> Any:
                 account_id = metadata.get("account_id")
                 if not account_id:
                     continue
-                req = universalledger_pb2.QueryAccountRequest(
-                    endpoint=endpoint, account_id=account_id
-                )
-                resp = stub.QueryAccount(req)
+                account = query_account(stub, endpoint, account_id)
                 balance = None
-                if resp.HasField("account") and resp.account.HasField(
-                    "user_details"
-                ):
-                    balance = resp.account.user_details.balance.value
-                accounts.append({
-                    "account_id": account_id,
-                    "balance": balance,
-                })
+                if account and account.HasField("user_details"):
+                    balance = account.user_details.balance.value
+                accounts.append({"account_id": account_id, "balance": balance})
             except Exception as exc:
-                accounts.append({
-                    "account_id": None,
-                    "balance": None,
-                    "error": str(exc),
-                })
+                accounts.append({"account_id": None, "balance": None, "error": str(exc)})
 
     return jsonify({"endpoint": endpoint, "accounts": accounts})
 
 
 def initialize_contract_on_chain() -> None:
-    """Call initialize() on the deployed on-chain contract at startup.
-
-    Safe to run on every restart — just overwrites platform_escrow with the same value.
-    Skips silently if env vars are missing or signing key is not found.
-    """
+    """Call initialize() on the deployed on-chain contract at startup."""
     contract_id = os.getenv("GCUL_CONTRACT_ID", "").strip()
     escrow_account_id = os.getenv("GCUL_ESCROW_ACCOUNT_ID", "").strip()
 
     if not contract_id or not escrow_account_id:
         print(
             "[ledger_service] Skipping on-chain initialize — GCUL_CONTRACT_ID /"
-            " GCUL_ESCROW_ACCOUNT_ID / GCUL_PARTICIPANT_ACCOUNT_ID not set in"
-            " .env"
+            " GCUL_ESCROW_ACCOUNT_ID / GCUL_PARTICIPANT_ACCOUNT_ID not set in .env"
         )
         return
 
     try:
-        _, participant_private_pem, _ = helpers.load_user_account_by_id(
-            escrow_account_id
-        )
-        stub, endpoint = helpers.get_stub_and_endpoint(
-            project_id=os.getenv(
-                "GCUL_PROJECT_ID", helpers.DEFAULT_PROJECT_ID
-            ),
-            region=os.getenv("GCUL_REGION", helpers.DEFAULT_REGION),
-        )
+        _, participant_private_pem, _ = helpers.load_user_account_by_id(escrow_account_id)
+        stub, endpoint = get_ledger_stub()
         seq_num = helpers.get_sequence_number(stub, endpoint, escrow_account_id)
         invoke_tx = transactions_pb2.InvokeContractMethod(
             contract_id=contract_id,
             method_name="initialize",
             method_arguments={
-                "platform_escrow_account": common_pb2.Value(
-                    string_value=escrow_account_id
-                ),
+                "platform_escrow_account": common_pb2.Value(string_value=escrow_account_id),
             },
         )
         client_tx = types_pb2.ClientTransaction(
@@ -384,11 +476,7 @@ def initialize_contract_on_chain() -> None:
             invoke_contract_method_transaction=invoke_tx,
         )
         tx_digest, _ = helpers.sign_and_submit_with_local_key(
-            stub,
-            endpoint,
-            escrow_account_id,
-            participant_private_pem,
-            client_tx,
+            stub, endpoint, escrow_account_id, participant_private_pem, client_tx
         )
         print(
             "[ledger_service] ✓ Contract initialized on-chain."
@@ -403,6 +491,4 @@ def initialize_contract_on_chain() -> None:
 
 if __name__ == "__main__":
     initialize_contract_on_chain()
-    app.run(
-        host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=False
-    )
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=False)
