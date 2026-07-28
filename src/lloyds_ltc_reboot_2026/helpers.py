@@ -44,8 +44,8 @@ from google.cloud.universalledger.v1 import (
     universalledger_pb2_grpc,
 )
 
-DEFAULT_PROJECT_ID = "moritzp-gcul-testing"
-DEFAULT_REGION = "us-central1"
+DEFAULT_PROJECT_ID = "ltc-hack2026-team22"
+DEFAULT_REGION = "green-tartan1.workshop.ongcp.co"
 DEFAULT_ENDPOINT_NAME = "gcul-pilot-testing"
 KEYS_DIR = "keys"
 

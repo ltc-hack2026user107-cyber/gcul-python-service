@@ -25,7 +25,12 @@ dependencies = [
     "grpcio>=1.50.0",
     "googleapis-common-protos>=1.56.0",
     "google-cloud-kms>=3.0.0",
+    "python-dotenv>=1.0.0",
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pyright]
+extraPaths = ["."]
+reportAttributeAccessIssue = "none"

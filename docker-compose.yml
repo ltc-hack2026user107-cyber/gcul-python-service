@@ -1,0 +1,9 @@
+services:
+  ledger-service:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      PORT: 8000
+      GCUL_PROJECT_ID: ltc-hack2026-team22
+      GCUL_REGION: green-tartan1.workshop.ongcp.co
