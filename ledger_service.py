@@ -455,7 +455,7 @@ def initialize_contract_on_chain() -> None:
     if not contract_id or not escrow_account_id:
         print(
             "[ledger_service] Skipping on-chain initialize — GCUL_CONTRACT_ID /"
-            " GCUL_ESCROW_ACCOUNT_ID / GCUL_PARTICIPANT_ACCOUNT_ID not set in .env"
+            " GCUL_ESCROW_ACCOUNT_ID  not set in .env"
         )
         return
 
