@@ -1,6 +1,6 @@
 {
   "index": 1,
   "account_id": "1:USR:GBP:425KTfXouwvpG6xrSHDujeEtugeToCBneYUP126PJpZed",
-  "private_key_path": "keys\\user_001.pem",
-  "public_key_path": "keys\\user_001_pub.pem"
+  "private_key_path": "keys/ser_001.pem",
+  "public_key_path": "keys/user_001_pub.pem"
 }
