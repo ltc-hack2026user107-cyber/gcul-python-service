@@ -451,7 +451,7 @@ def initialize_contract_on_chain() -> None:
     """Call initialize() on the deployed on-chain contract at startup."""
     contract_id = os.getenv("GCUL_CONTRACT_ID", "").strip()
     escrow_account_id = os.getenv("GCUL_ESCROW_ACCOUNT_ID", "").strip()
-
+    print("initialize_contract_on_chain", escrow_account_id)
     if not contract_id or not escrow_account_id:
         print(
             "[ledger_service] Skipping on-chain initialize — GCUL_CONTRACT_ID /"
