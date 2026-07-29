@@ -97,6 +97,7 @@ def get_sequence_number(
     req = universalledger_pb2.QueryAccountRequest(
         endpoint=endpoint, account_id=account_id
     )
+    print("get_sequence_number ", account_id)
     resp = stub.QueryAccount(req)
     return int(resp.account.sequence_number)
 
@@ -254,7 +255,7 @@ def save_user_account(
         f.write(private_pem)
     with open(pub_path, "wb") as f:
         f.write(public_pem)
-
+    print("save_user_account ", account_id)
     metadata = {
         "index": index,
         "account_id": account_id,
@@ -280,6 +281,7 @@ def load_user_account(index: int) -> Tuple[str, bytes, bytes]:
     account_id = metadata["account_id"]
     priv_path = metadata["private_key_path"]
     pub_path = metadata["public_key_path"]
+    print("load_user_account ", account_id)
 
     with open(priv_path, "rb") as f:
         private_pem = f.read()
@@ -293,7 +295,7 @@ def load_user_account_by_id(account_id: str) -> Tuple[str, bytes, bytes]:
     """Search keys/ directory for a user account matching account_id and return (account_id, private_pem, public_pem)."""
     if not os.path.exists(KEYS_DIR):
         raise FileNotFoundError(f"Directory {KEYS_DIR} does not exist.")
-
+    print("load_user_account_by_id ", account_id)
     for filename in sorted(os.listdir(KEYS_DIR)):
         if filename.endswith(".json"):
             meta_path = os.path.join(KEYS_DIR, filename)
